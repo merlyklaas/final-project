@@ -8,7 +8,7 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-pacman::p_load(rio, here, tidyverse, finalfit, recipes, caret,glmnet, ranger, Hmisc, ragg, gbm)
+pacman::p_load(rio, here, tidyverse, finalfit, recipes, caret,glmnet, ranger, Hmisc, ragg, gbm, vip)
 ```
 
 ```{r}
