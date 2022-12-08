@@ -1,0 +1,302 @@
+---
+title: "final-project-machine-learning"
+author: "Merly Klaas"
+date: "2022-12-08"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+pacman::p_load(rio, here, tidyverse, finalfit, recipes, caret,glmnet, ranger, Hmisc, ragg, gbm)
+```
+
+```{r}
+#Import data 
+dat <- import(here("data","dat-category.csv"))
+         
+str(dat)
+```
+```{r}
+ff_glimpse(dat)
+
+```
+```{r}
+dat %>% 
+select_if((is.character))%>% 
+Hmisc::describe()
+```
+
+```{r}
+blueprint <- recipe(x  = dat,
+                    vars  = colnames(dat),
+                    roles = c('ID','outcome',rep('predictor',78))) %>%
+                  step_indicate_na(all_predictors()) %>%
+                step_zv(all_numeric())%>%
+                 step_impute_mean(all_numeric_predictors()) %>%
+                 step_impute_mode(all_nominal()) %>%
+                 step_poly("poor_pct",degree=3) %>%
+                 step_normalize(all_numeric_predictors())%>%
+                 step_dummy(all_nominal(), one_hot=TRUE)
+blueprint
+view(blueprint %>% prep() %>% summary)
+```
+**Split the data for: training and test subsets. . Let the training data have the 80% of cases and the test data have the 20% of the cases. Set the seed to 1031000 for any random sampling process before splitting data.**
+```{r}
+set.seed(1031000)
+loc      <- sample(1:nrow(dat), round(nrow(dat) * 0.8))
+ind_tr  <- dat[loc, ]
+ind_te  <- dat[-loc, ]
+
+dim(ind_tr)
+
+dim(ind_te)
+```
+
+```{r}
+# Randomly shuffle the training dataset
+
+  set.seed(1031000) # for reproducibility
+
+  ind_tr = ind_tr[sample(nrow(ind_tr)),]
+
+# Create 5 folds with equal size
+
+  folds = cut(seq(1,nrow(ind_tr)),breaks=10,labels=FALSE)
+  
+# Create the list for each fold 
+      
+  my.indices <- vector('list',10)
+
+  for(i in 1:10){
+    my.indices[[i]] <- which(folds!=i)
+  }
+
+cv <- trainControl(method = "cv",
+                   index  = my.indices)
+
+```
+
+
+## Model 1 Ridge Regression**
+
+```{r}
+gridrd <- data.frame(alpha = 0, lambda = seq(0.01,3,.01)) 
+gridrd 
+```
+
+```{r}
+ridge_mod <- caret::train(blueprint, 
+                          data      = ind_tr, 
+                          method    = "glmnet",
+                          tuneGrid  = gridrd,
+                          trControl = cv)
+
+ridge_mod
+```
+
+```{r}
+ridge_mod$bestTune
+plot(ridge_mod)
+
+```
+
+```{r}
+predict_te_ridge <- predict(ridge_mod, ind_te)
+rsq_te <- cor(ind_te$id_overall,predict_te_ridge)^2
+rsq_te
+mae_te <- mean(abs(ind_te$id_overall - predict_te_ridge))
+mae_te
+rmse_te <- sqrt(mean((ind_te$id_overall - predict_te_ridge)^2))
+rmse_te
+```
+## Model 2 Random forest 
+#### randomly sample 30 predictors
+
+```{r}
+
+
+gridrf <- expand.grid(mtry = 30,splitrule='variance',min.node.size=2)
+gridrf
+
+# Run the Random Forest by iterating over num.trees using the 
+# values 5, 20, 40, 60,  ..., 200
+
+ nbags <- c(5,seq(from = 20,to = 200, by = 20))
+    
+  bags <- vector('list',length(nbags))
+    
+    for(i in 1:length(nbags)){
+      
+      bags[[i]] <- caret::train(blueprint,
+                                data      = ind_tr,
+                                method    = 'ranger',
+                                trControl = cv,
+                                tuneGrid  = gridrf,
+                                num.trees = nbags[i],
+                                importance = "impurity",
+                                max.depth = 60)
+      
+      print(i)
+ }
+```
+
+```{r}
+rmses <- c()
+
+for(i in 1:length(nbags)){
+  
+  rmses[i] = bags[[i]]$results$RMSE
+  
+}
+
+ggplot()+
+  geom_line(aes(x=nbags,y=rmses))+
+  xlab('Number of Trees')+
+  ylab('RMSE')+
+  ylim(c(0.7,0.90))+
+  theme_bw()
+```
+```{r}
+nbags[which.min(rmses)]
+nbags
+```
+**Although the model with 80 trees has the lowest RMSE for training test I test the rest of number of trees and found that the 200 trees (bag 11th) yielded largest predictive power for the test data.**
+```{r}
+predicted_te <- predict(bags[[11]],ind_te)
+
+# MAE
+mean(abs(ind_te$id_overall - predicted_te))
+
+# RMSE
+sqrt(mean((ind_te$id_overall - predicted_te)^2))
+
+# R-square
+cor(ind_te$id_overall,predicted_te)^2
+```
+
+
+## Model 3 Gradient Boosting Trees
+
+```{r}
+require(doParallel)
+                                                     
+ncores <- 10
+                                                     
+cl <- makePSOCKcluster(ncores)
+                                                     
+registerDoParallel(cl)
+```
+
+```{r}
+# Grid Settings  
+                                                     
+grid <- expand.grid(shrinkage         = 0.1,
+                    n.trees           = 1:500,
+                    interaction.depth = 5,
+                    n.minobsinnode    = 10)
+                                                     
+                                                     
+gbm1 <- caret::train(blueprint,
+                    data         = ind_tr,
+                    method       = 'gbm',
+                    trControl    = cv,
+                    tuneGrid     = grid,
+                    bag.fraction = 1,
+                    verbose      = FALSE)
+                                                     
+gbm1$times
+plot(gbm1,type='l')
+```
+
+
+**Tune the interaction depth and n.minobsinnode**
+```{r}
+gbm1$results[which.min(gbm1$results$RMSE),]
+
+#We will fix the n.of trees to 52 onwards
+```
+```{r}
+grid <- expand.grid(shrinkage         = 0.1,
+                    n.trees           = 52,
+                    interaction.depth = 1:15,
+                    n.minobsinnode    = c(5,10,20,30,40,50))
+                                                     
+                                                     
+gbm2 <- caret::train(blueprint,
+                     data      = ind_tr,
+                     method    = 'gbm',
+                     trControl = cv,
+                     tuneGrid  = grid,
+                     bag.fraction = 1,
+                     verbose = FALSE)
+                                                     
+gbm2$times
+plot(gbm2,type='l')
+```
+
+```{r}
+gbm2$bestTune
+gbm2$results[which.min(gbm2$results$RMSE),]
+```
+
+```{r}
+predicted_te <- predict(gbm2,ind_te)
+
+# MAE
+mean(abs(ind_te$id_overall - predicted_te))
+
+# RMSE
+sqrt(mean((ind_te$id_overall - predicted_te)^2))
+
+# R-square
+cor(ind_te$id_overall,predicted_te)^2
+```
+
+**Tune in the n.trees to be 1 to 8000**
+```{r}
+grid <- expand.grid(shrinkage         = 0.01,
+                    n.trees           = 1:8000,
+                    interaction.depth = 13,
+                    n.minobsinnode    = 20)
+                                                     
+                                                     
+gbm3 <- caret::train(blueprint,
+                     data      = ind_tr,
+                     method    = 'gbm',
+                     trControl = cv,
+                     tuneGrid  = grid,
+                     bag.fraction = 1,
+                     verbose= FALSE)
+                                                     
+gbm3$times
+plot(gbm3,type='l')
+gbm3$results[which.min(gbm3$results$RMSE),]
+```
+```{r}
+predicted_te <- predict(gbm3,ind_te)
+
+# MAE
+mean(abs(ind_te$id_overall - predicted_te))
+
+# RMSE
+sqrt(mean((ind_te$id_overall - predicted_te)^2))
+
+# R-square
+cor(ind_te$id_overall,predicted_te)^2
+```
+
+```{r}
+perf <- matrix(c(0.434, 0.598,0.731,0.419,0.584,0.731,0.301,0.646,0.80),ncol=3,byrow=TRUE)
+colnames(perf) <- c("R-Squared","MAE","RMSE")
+rownames(perf) <- c("Random Forest","Gradient Boosting Tree", "Ridge Regularized Regression")
+perf <- as.table(perf)
+perf
+
+```
+
+```{r}
+vip(bags[[11]],num_features = 10, geom = "point") + theme_bw()
+```
+
+
